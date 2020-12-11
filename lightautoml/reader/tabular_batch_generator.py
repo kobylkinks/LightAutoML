@@ -10,8 +10,9 @@ import pandas as pd
 from joblib import Parallel, delayed
 from log_calls import record_history
 from pandas import DataFrame
+from sqlalchemy import create_engine
 
-ReadableToDf = Union[str, np.ndarray, DataFrame, Dict[str, np.ndarray], 'Batch']
+ReadableToDf = Union[str, np.ndarray, DataFrame, Dict[str, np.ndarray], 'Batch', 'SqlEngineInfo']
 
 
 @record_history(enabled=False)
@@ -276,6 +277,22 @@ class DfBatchGenerator(BatchGenerator):
         return Batch(self.data.iloc[self.idxs[idx]])
 
 
+class SqlEngineInfo:
+    connection_string: str
+    query: str
+
+
+@record_history(enabled=False)
+class SqlBatchGenerator(DfBatchGenerator):
+    def __init__(self, connection_string: str, query: str, n_jobs: int = 1, batch_size: int = None):
+        self.engine = create_engine(connection_string)
+        self.query = query
+
+        with self.engine.connect() as conn:
+            data = conn.execute(query).fetchall()
+            super(SqlBatchGenerator, self).__init__(pd.DataFrame(data), n_jobs, batch_size)
+
+
 @record_history(enabled=False)
 class FileBatchGenerator(BatchGenerator):
 
@@ -361,12 +378,16 @@ def read_data(data: ReadableToDf, features_names: Optional[Sequence[str]] = None
         else:
             return read_csv(data, n_jobs, **read_csv_params), None
 
+    if isinstance(data, SqlEngineInfo):
+        reader = SqlBatchGenerator(data.connection_string, data.query)
+        return reader.data, None
+
     raise ValueError('Input data format is not supported')
 
 
 @record_history(enabled=False)
 def read_batch(data: ReadableToDf, features_names: Optional[Sequence[str]] = None, n_jobs: int = 1,
-               batch_size: Optional[int] = None, read_csv_params: Optional[dict] = None) -> Iterable:
+               batch_size: Optional[int] = None, read_csv_params: Optional[dict] = None, **kwargs) -> Iterable:
     """Read data for inference by batches for simple tabular data
 
     Args:
@@ -400,5 +421,8 @@ def read_batch(data: ReadableToDf, features_names: Optional[Sequence[str]] = Non
         else:
             data, _ = read_data(data, features_names, n_jobs, read_csv_params)
             return DfBatchGenerator(data, n_jobs=n_jobs, batch_size=batch_size)
+
+    if isinstance(data, SqlEngineInfo):
+        return SqlBatchGenerator(data.connection_string, data.query, n_jobs=n_jobs, batch_size=batch_size)
 
     raise ValueError('Data type not supported')
